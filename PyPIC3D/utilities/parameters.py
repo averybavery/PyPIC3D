@@ -46,6 +46,7 @@ class StaticParameters(NamedTuple):
     horizon_field_cells: int = 0
     sin_chi: float = 0.0
     dark_mu: float = 0.0
+    collisions: tuple = ()
 
 
 class DynamicParameters(NamedTuple):
@@ -232,7 +233,7 @@ def _output_value(value):
 
 
 def static_parameters_for_output(static_parameters):
-    skip = {"field_mesh"}
+    skip = {"field_mesh", "collisions"}
     static_items = static_parameters._asdict()
     if static_parameters.solver == "static_metric":
         from PyPIC3D.relativity.interpolate_metric import RECONSTRUCTION
