@@ -170,7 +170,7 @@ def series(code, machine, kind):
             "gpus": lambda r: r["platform"] == "cuda"}[kind]
     rows = sorted((r["cores"] if kind == "cores" else r["devices"], r["s_per_step"]) for r in results
                   if r["code"] == code and r["machine"] == machine and pick(r))
-    return np.array(rows).T if rows else (np.array([]), np.array([]))
+    return np.array(rows).T if len(rows) > 1 else (np.array([]), np.array([]))
 
 
 machines = sorted({r["machine"] for r in results})
@@ -195,7 +195,7 @@ for name, codes in (("scaling_pypic3d", ("PyPIC3D",)), ("scaling_vs_warpx", ("Py
     ax[0].set(xlabel="CPU cores / devices / GPUs", ylabel="wall time per step [ms]", title=title)
     ax[1].set(xlabel="CPU cores / devices / GPUs", ylabel="speed-up vs. 1 unit", title="Strong scaling")
     ax[0].set_xscale("log", base=2)
-    ax[0].xaxis.set_major_formatter(plt.ScalarFormatter())
+    ax[0].xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
     for a in ax:
         a.legend(fontsize=8)
         a.grid(alpha=0.3, which="both")
