@@ -3,12 +3,13 @@ threads) on the same 3D uniform thermal plasma. Run on Linux/WSL (or a GPU node)
     python benchmarks/scaling.py
 Each configuration runs in a fresh subprocess so core affinity and device counts apply.
 
-GPU (NVIDIA): on any Linux machine with a CUDA GPU (Google Colab, UW CHTC GPU Lab, a lab node):
-    git clone -b avery-workshop https://github.com/<owner>/PyPIC3D && cd PyPIC3D
-    pip install -U "jax[cuda12]" -e .
-    python benchmarks/scaling.py        # adds a "PyPIC3D GPU" row/line; send back outputs/scaling/"""
+GPUs: run benchmarks/perlmutter.sh on NERSC (or any CUDA node with jax[cuda12]). Results are saved per
+machine as outputs/scaling/scaling_<machine>.json; copy them together and run
+    python benchmarks/scaling.py --plot
+to redraw both figures (PyPIC3D alone, PyPIC3D vs WarpX) from every machine."""
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -22,12 +23,13 @@ import numpy as np
 GRID = (32, 32, 32)             # cells
 PPC = 8                         # macro-particles per cell per species (electrons + ions)
 STEPS = 10                      # timed steps (after compilation / warm-up)
-CORES = [c for c in (1, 2, 4, 8) if c <= os.cpu_count()]  # CPU cores to pin (strong scaling)
+CORES = [2**i for i in range(8) if 2**i <= os.cpu_count()]  # CPU cores to pin (strong scaling)
 DEVICES = [1, 2, 4, 8]          # JAX CPU devices = tiles along x (domain decomposition, all cores)
-RUN_GPU = shutil.which("nvidia-smi") is not None  # time the GPU too (needs jax[cuda12])
+GPUS = [g for g in (1, 2, 4) if g <= len(subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True).stdout.split("GPU ")) - 1] if shutil.which("nvidia-smi") else []
 WARPX_BIN = shutil.which("warpx.3d")  # set to None to skip WarpX
 DENSITY, TEMPERATURE_EV = 1.0e18, 10.0
 OUTPUT_DIR = "outputs/scaling"
+MACHINE = os.environ.get("NERSC_HOST", platform.node())
 
 E, ME, MP, EPS, C = 1.602176634e-19, 9.1093837e-31, 1.67262192e-27, 8.8541878128e-12, 2.99792458e8
 DX = np.sqrt(EPS * TEMPERATURE_EV * E / (DENSITY * E**2))      # one Debye length per cell
@@ -35,15 +37,16 @@ VTH_E, VTH_I = np.sqrt(TEMPERATURE_EV * E / ME), np.sqrt(TEMPERATURE_EV * E / MP
 N_PARTICLES = PPC * int(np.prod(GRID))
 
 
-def pypic3d_worker(cores, devices, platform):
+def pypic3d_worker(cores, devices, backend):
     """Time PyPIC3D steps in this process (called through the subprocess entry point below)."""
     if cores:
         os.sched_setaffinity(0, range(cores))
-    os.environ.update(JAX_PLATFORMS=platform, JAX_NUM_CPU_DEVICES=str(devices), JAX_ENABLE_X64="1")
+    os.environ.update(JAX_PLATFORMS=backend, JAX_NUM_CPU_DEVICES=str(devices), JAX_ENABLE_X64="1",
+                      CUDA_VISIBLE_DEVICES=",".join(map(str, range(devices))))
     import jax
     from PyPIC3D.initialization import initialize_simulation
 
-    out = os.path.join(OUTPUT_DIR, f"pypic3d_{platform}_{cores}c_{devices}d")
+    out = os.path.join(OUTPUT_DIR, f"pypic3d_{backend}_{cores}c_{devices}d")
     os.makedirs(out, exist_ok=True)
     species = lambda name, q, m, vth: {"name": name, "N_particles": N_PARTICLES, "charge": q, "mass": m, "vth": float(vth),
                                        "number_density": DENSITY}
@@ -69,12 +72,12 @@ def pypic3d_worker(cores, devices, platform):
         particles, fields = step(particles, fields)
     jax.block_until_ready(fields)
     per_step = (time.perf_counter() - start) / STEPS
-    return {"code": "PyPIC3D", "platform": platform, "device_kind": jax.devices()[0].device_kind, "cores": cores,
+    return {"code": "PyPIC3D", "machine": MACHINE, "platform": backend, "device_kind": jax.devices()[0].device_kind, "cores": cores,
             "devices": devices, "s_per_step": per_step, "compile_s": compile_s, "overflow": bool(fields[-1])}
 
 
-def run_pypic3d(cores, devices, platform="cpu"):
-    args = json.dumps([cores, devices, platform])
+def run_pypic3d(cores, devices, backend="cpu"):
+    args = json.dumps([cores, devices, backend])
     result = subprocess.run([sys.executable, __file__, "--worker", args], capture_output=True, text=True)
     lines = [line for line in result.stdout.splitlines() if line.startswith("RESULT ")]
     if not lines:
@@ -123,7 +126,7 @@ particles.species_names = electrons ions
                          capture_output=True, text=True).stdout
     calls, seconds = re.findall(r"WarpX::Evolve::step\s+(\d+)\s+([\d.eE+-]+)", log)[-1]
     # the profiler prints exclusive then inclusive tables; the last entry is the inclusive step time
-    return {"code": "WarpX", "platform": "cpu", "cores": threads, "devices": 1, "s_per_step": float(seconds) / int(calls)}
+    return {"code": "WarpX", "machine": MACHINE, "platform": "cpu", "cores": threads, "devices": 1, "s_per_step": float(seconds) / int(calls)}
 
 
 # ----------------------------- run the benchmarks -----------------------------
@@ -132,52 +135,70 @@ if __name__ == "__main__" and "--worker" in sys.argv:
     sys.exit()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-print(f"Uniform plasma: grid {GRID}, {2 * N_PARTICLES:,} macro-particles, {STEPS} timed steps")
-results = []
-for cores in CORES:
-    print(f"PyPIC3D  {cores} core(s), 1 device ...", flush=True)
-    results.append(run_pypic3d(cores, 1))
-for devices in DEVICES[1:]:
-    print(f"PyPIC3D  all cores, {devices} CPU devices/tiles ...", flush=True)
-    results.append(run_pypic3d(0, devices))
-if RUN_GPU:
-    print("PyPIC3D  GPU (if visible) ...", flush=True)
-    results.append(run_pypic3d(0, 1, "cuda"))
-if WARPX_BIN:
-    for threads in CORES:
+if "--plot" not in sys.argv:
+    print(f"{MACHINE}: grid {GRID}, {2 * N_PARTICLES:,} macro-particles, {STEPS} timed steps, GPUs {GPUS}")
+    results = []
+    for cores in CORES:
+        print(f"PyPIC3D  {cores} core(s), 1 device ...", flush=True)
+        results.append(run_pypic3d(cores, 1))
+    for devices in DEVICES[1:]:
+        print(f"PyPIC3D  all cores, {devices} CPU devices/tiles ...", flush=True)
+        results.append(run_pypic3d(0, devices))
+    for gpus in GPUS:
+        print(f"PyPIC3D  {gpus} GPU(s), one tile per GPU ...", flush=True)
+        results.append(run_pypic3d(0, gpus, "cuda"))
+    for threads in CORES if WARPX_BIN else []:
         print(f"WarpX    {threads} OpenMP thread(s) ...", flush=True)
         results.append(run_warpx(threads))
-results = [r for r in results if r]
-for r in results:
-    print(f"  {r['code']:8s} {r['platform']:5s} cores={r['cores'] or 'all':>3} devices={r['devices']}  "
-          f"{r['s_per_step'] * 1e3:9.2f} ms/step  {r['s_per_step'] * 1e9 / (2 * N_PARTICLES):7.1f} ns/particle/step"
-          + (f"  (compile {r['compile_s']:.1f} s)" if "compile_s" in r else ""))
+    results = [r for r in results if r]
+    with open(os.path.join(OUTPUT_DIR, f"scaling_{MACHINE}.json"), "w") as handle:
+        json.dump(results, handle, indent=1)
 
 # ----------------------------- plot, save, and print -----------------------------
-with open(os.path.join(OUTPUT_DIR, "scaling.json"), "w") as handle:
-    json.dump(results, handle, indent=1)
-fig, ax = plt.subplots(1, 2, figsize=(12, 4.5))
-for code, marker in (("PyPIC3D", "o"), ("WarpX", "s")):
-    rows = [r for r in results if r["code"] == code and r["platform"] == "cpu" and r["devices"] == 1 and r["cores"]]
-    if rows:
-        cores = np.array([r["cores"] for r in rows])
-        t = np.array([r["s_per_step"] for r in rows])
-        ax[0].loglog(cores, t * 1e3, marker=marker, lw=2, label=code)
-        ax[0].loglog(cores, t[0] * 1e3 / cores * cores[0], "k:", lw=1)
-        ax[1].plot(cores, t[0] / t, marker=marker, lw=2, label=f"{code} (cores)")
-rows = [r for r in results if r["code"] == "PyPIC3D" and r["platform"] == "cpu" and (r["devices"] > 1 or not r["cores"])]
-base = next((r["s_per_step"] for r in results if r["code"] == "PyPIC3D" and r["cores"] == 1), None)
-if rows and base:
-    ax[1].plot([r["devices"] for r in rows], [base / r["s_per_step"] for r in rows], "^-", lw=2, label="PyPIC3D (devices/tiles)")
+results = [r for f in sorted(os.listdir(OUTPUT_DIR)) if f.startswith("scaling_") and f.endswith(".json")
+           for r in json.load(open(os.path.join(OUTPUT_DIR, f)))]
 for r in results:
-    if r["platform"] == "cuda":
-        ax[0].axhline(r["s_per_step"] * 1e3, color="tab:green", ls="--", label=f"PyPIC3D GPU ({r['device_kind']})")
-ax[1].plot(CORES, CORES, "k:", label="ideal")
-ax[0].set(xlabel="CPU cores", ylabel="wall time per step [ms]", title=f"{2 * N_PARTICLES:,} particles, {np.prod(GRID):,} cells")
-ax[1].set(xlabel="CPU cores / devices", ylabel="speed-up vs 1 core", title="Strong scaling")
-for a in ax:
-    a.legend()
-    a.grid(alpha=0.3, which="both")
-fig.tight_layout()
-fig.savefig(os.path.join(OUTPUT_DIR, "scaling.png"), dpi=200)
-print(f"Saved {OUTPUT_DIR}/scaling.png and scaling.json")
+    r.setdefault("machine", "laptop")
+    print(f"  {r['machine']:10s} {r['code']:8s} {r['platform']:5s} cores={r['cores'] or 'all':>3} devices={r['devices']}  "
+          f"{r['s_per_step'] * 1e3:9.2f} ms/step  {r['s_per_step'] * 1e9 / (2 * N_PARTICLES):8.1f} ns/particle/step")
+
+
+def series(code, machine, kind):
+    """(resources, seconds per step) for CPU cores, CPU devices, or GPUs on one machine."""
+    pick = {"cores": lambda r: r["platform"] == "cpu" and r["devices"] == 1 and r["cores"],
+            "devices": lambda r: r["platform"] == "cpu" and (r["devices"] > 1 or (r["cores"] == 1 and r["devices"] == 1)),
+            "gpus": lambda r: r["platform"] == "cuda"}[kind]
+    rows = sorted((r["cores"] if kind == "cores" else r["devices"], r["s_per_step"]) for r in results
+                  if r["code"] == code and r["machine"] == machine and pick(r))
+    return np.array(rows).T if rows else (np.array([]), np.array([]))
+
+
+machines = sorted({r["machine"] for r in results})
+title = f"{2 * N_PARTICLES:,} particles, {int(np.prod(GRID)):,} cells"
+styles = {"cores": ("o", "-", "CPU cores"), "devices": ("^", "--", "CPU devices (tiles)"), "gpus": ("*", "-", "GPUs")}
+for name, codes in (("scaling_pypic3d", ("PyPIC3D",)), ("scaling_vs_warpx", ("PyPIC3D", "WarpX"))):
+    fig, ax = plt.subplots(1, 2, figsize=(12, 4.8))
+    top, line = 1, 0
+    for code in codes:
+        for machine in machines:
+            for kind, (marker, ls, label) in styles.items():
+                n, t = series(code, machine, kind)
+                if not len(n):
+                    continue
+                color, line = f"C{line}", line + 1
+                tag = f"{code} {label}" + (f" [{machine}]" if len(machines) > 1 else "")
+                ax[0].loglog(n, t * 1e3, marker=marker, ls=ls, lw=2, ms=8, color=color, label=tag)
+                ax[1].plot(n, t[0] / t, marker=marker, ls=ls, lw=2, ms=8, color=color, label=tag)
+                top = max(top, n.max())
+    ideal = np.array([1, top])
+    ax[1].plot(ideal, ideal, "k:", label="ideal")
+    ax[0].set(xlabel="CPU cores / devices / GPUs", ylabel="wall time per step [ms]", title=title)
+    ax[1].set(xlabel="CPU cores / devices / GPUs", ylabel="speed-up vs. 1 unit", title="Strong scaling")
+    ax[0].set_xscale("log", base=2)
+    ax[0].xaxis.set_major_formatter(plt.ScalarFormatter())
+    for a in ax:
+        a.legend(fontsize=8)
+        a.grid(alpha=0.3, which="both")
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTPUT_DIR, f"{name}.png"), dpi=300)
+    print(f"Saved {OUTPUT_DIR}/{name}.png")
