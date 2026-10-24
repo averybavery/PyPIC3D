@@ -174,11 +174,12 @@ def series(code, machine, kind):
 
 
 machines = sorted({r["machine"] for r in results})
-title = f"{2 * N_PARTICLES:,} particles, {int(np.prod(GRID)):,} cells"
 styles = {"cores": ("o", "-", "CPU cores"), "devices": ("^", "--", "CPU devices (tiles)"), "gpus": ("*", "-", "GPUs")}
-for name, codes in (("scaling_pypic3d", ("PyPIC3D",)), ("scaling_vs_warpx", ("PyPIC3D", "WarpX"))):
+figures = [("scaling_pypic3d", ("PyPIC3D",))] + ([("scaling_vs_warpx", ("PyPIC3D", "WarpX"))]
+                                                 if any(r["code"] == "WarpX" for r in results) else [])
+for name, codes in figures:
     fig, ax = plt.subplots(1, 2, figsize=(12, 4.8))
-    top, line = 1, 0
+    line = 0
     for code in codes:
         for machine in machines:
             for kind, (marker, ls, label) in styles.items():
@@ -189,16 +190,15 @@ for name, codes in (("scaling_pypic3d", ("PyPIC3D",)), ("scaling_vs_warpx", ("Py
                 tag = f"{code} {label}" + (f" [{machine}]" if len(machines) > 1 else "")
                 ax[0].loglog(n, t * 1e3, marker=marker, ls=ls, lw=2, ms=8, color=color, label=tag)
                 ax[1].plot(n, t[0] / t, marker=marker, ls=ls, lw=2, ms=8, color=color, label=tag)
-                top = max(top, n.max())
-    ideal = np.array([1, top])
-    ax[1].plot(ideal, ideal, "k:", label="ideal")
-    ax[0].set(xlabel="CPU cores / devices / GPUs", ylabel="wall time per step [ms]", title=title)
-    ax[1].set(xlabel="CPU cores / devices / GPUs", ylabel="speed-up vs. 1 unit", title="Strong scaling")
-    ax[0].set_xscale("log", base=2)
-    ax[0].xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
+    ax[0].set(xlabel="CPU cores / devices / GPUs", ylabel="wall time per step [ms]", title="Wall time per step")
+    ax[1].set(xlabel="CPU cores / devices / GPUs", ylabel="speed-up vs. 1 core / device / GPU", title="Strong scaling")
     for a in ax:
+        a.set_xscale("log", base=2)
+        a.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
         a.legend(fontsize=8)
         a.grid(alpha=0.3, which="both")
     fig.tight_layout()
     fig.savefig(os.path.join(OUTPUT_DIR, f"{name}.png"), dpi=300)
     print(f"Saved {OUTPUT_DIR}/{name}.png")
+if len(figures) == 1:
+    print("No WarpX results found, so scaling_vs_warpx.png was not drawn (add a machine's JSON that has WarpX runs).")
