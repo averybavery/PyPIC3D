@@ -32,6 +32,7 @@ GPUS = [g for g in (1, 2, 4) if g <= len(subprocess.run(["nvidia-smi", "-L"], ca
 WARPX_BIN = shutil.which("warpx.3d")  # set to None to skip WarpX
 DENSITY, TEMPERATURE_EV = 1.0e18, 10.0
 OUTPUT_DIR = "outputs/scaling"
+POSTER_MACHINE = "perlmutter"   # scaling_pypic3d.png shows only this machine's runs (all machines if none match)
 MACHINE = os.environ.get("NERSC_HOST", platform.node()) + ("" if GRID == (32, 32, 32) else f" {GRID[0]}x{GRID[1]}x{GRID[2]}")
 
 E, ME, MP, EPS, C = 1.602176634e-19, 9.1093837e-31, 1.67262192e-27, 8.8541878128e-12, 2.99792458e8
@@ -182,20 +183,27 @@ figures = [("scaling_pypic3d", ("PyPIC3D",))] + ([("scaling_vs_warpx", ("PyPIC3D
                                                  if any(r["code"] == "WarpX" for r in results) else [])
 for name, codes in figures:
     fig, ax = plt.subplots(1, 2, figsize=(12, 4.8))
-    line = 0
+    poster = name == "scaling_pypic3d"
+    shown = [m for m in machines if POSTER_MACHINE in m] if poster else machines
+    lines = []
     for code in codes:
-        for machine in machines:
+        for machine in shown or machines:
             one_core = [r["s_per_step"] for r in results if r["code"] == code and r["machine"] == machine
                         and r["platform"] == "cpu" and r["cores"] == 1 and r["devices"] == 1]
+            nx = machine.split(" ")[1].split("x")[0] if " " in machine else str(32)
             for kind, (marker, ls, label) in styles.items():
                 n, t = series(code, machine, kind)
-                if not len(n):
-                    continue
-                color, line = f"C{line}", line + 1
-                tag = f"{code} {label}" + (f" [{machine}]" if len(machines) > 1 else "")
-                ax[0].loglog(n, t * 1e3, marker=marker, ls=ls, lw=2, ms=8, color=color, label=tag)
-                ax[1].plot(n, (one_core[0] if one_core else t[0]) / t, marker=marker, ls=ls, lw=2, ms=8, color=color,
-                           label=tag + ("" if one_core else " (vs. 1 GPU)"))
+                if len(n):
+                    speedup = (one_core[0] if one_core else t[0]) / t
+                    tag = (f"{label} (nx = {nx})" if poster else
+                           f"{code} {label}" + (f" [{machine}]" if len(machines) > 1 else "")) + ("" if one_core else " (vs. 1 GPU)")
+                    lines.append(((kind, int(nx)), n, t, speedup, tag, marker, ls))
+    lines.sort(key=lambda entry: entry[0]) if poster else None
+    shades = plt.cm.Blues(np.linspace(0.45, 0.95, len(lines)))
+    for i, (_, n, t, speedup, tag, marker, ls) in enumerate(lines):
+        style = dict(marker="o", ls="-", color=shades[i]) if poster else dict(marker=marker, ls=ls, color=f"C{i}")
+        ax[0].loglog(n, t * 1e3, lw=2, ms=7, label=tag, **style)
+        ax[1].plot(n, speedup, lw=2, ms=7, label=tag, **style)
     ax[0].set(xlabel="CPU cores / devices / GPUs", ylabel="wall time per step [ms]", title="Wall time per step")
     ax[1].set(xlabel="CPU cores / devices / GPUs", ylabel="speed-up vs. 1 CPU core", title="Strong scaling")
     ax[1].set_yscale("log")
