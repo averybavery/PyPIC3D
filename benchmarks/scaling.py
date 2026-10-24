@@ -20,16 +20,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # ----------------------------- input parameters -----------------------------
-GRID = (32, 32, 32)             # cells
+GRID = tuple(int(n) for n in os.environ.get("SCALING_GRID", "32,32,32").split(","))  # cells
 PPC = 8                         # macro-particles per cell per species (electrons + ions)
 STEPS = 10                      # timed steps (after compilation / warm-up)
 CORES = [2**i for i in range(8) if 2**i <= os.cpu_count()]  # CPU cores to pin (strong scaling)
 DEVICES = [1, 2, 4, 8]          # JAX CPU devices = tiles along x (domain decomposition, all cores)
+CORES = [int(c) for c in os.environ.get("SCALING_CORES", ",".join(map(str, CORES))).split(",") if c]
+DEVICES = [int(d) for d in os.environ.get("SCALING_DEVICES", ",".join(map(str, DEVICES))).split(",") if d]
+# SCALING_GRID / SCALING_CORES / SCALING_DEVICES override these from a job script (e.g. benchmarks/perlmutter_large.sh)
 GPUS = [g for g in (1, 2, 4) if g <= len(subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True).stdout.split("GPU ")) - 1] if shutil.which("nvidia-smi") else []
 WARPX_BIN = shutil.which("warpx.3d")  # set to None to skip WarpX
 DENSITY, TEMPERATURE_EV = 1.0e18, 10.0
 OUTPUT_DIR = "outputs/scaling"
-MACHINE = os.environ.get("NERSC_HOST", platform.node())
+MACHINE = os.environ.get("NERSC_HOST", platform.node()) + ("" if GRID == (32, 32, 32) else f" {GRID[0]}x{GRID[1]}x{GRID[2]}")
 
 E, ME, MP, EPS, C = 1.602176634e-19, 9.1093837e-31, 1.67262192e-27, 8.8541878128e-12, 2.99792458e8
 DX = np.sqrt(EPS * TEMPERATURE_EV * E / (DENSITY * E**2))      # one Debye length per cell
@@ -72,7 +75,7 @@ def pypic3d_worker(cores, devices, backend):
         particles, fields = step(particles, fields)
     jax.block_until_ready(fields)
     per_step = (time.perf_counter() - start) / STEPS
-    return {"code": "PyPIC3D", "machine": MACHINE, "platform": backend, "device_kind": jax.devices()[0].device_kind, "cores": cores,
+    return {"code": "PyPIC3D", "machine": MACHINE, "particles": 2 * N_PARTICLES, "platform": backend, "device_kind": jax.devices()[0].device_kind, "cores": cores,
             "devices": devices, "s_per_step": per_step, "compile_s": compile_s, "overflow": bool(fields[-1])}
 
 
@@ -126,7 +129,7 @@ particles.species_names = electrons ions
                          capture_output=True, text=True).stdout
     calls, seconds = re.findall(r"WarpX::Evolve::step\s+(\d+)\s+([\d.eE+-]+)", log)[-1]
     # the profiler prints exclusive then inclusive tables; the last entry is the inclusive step time
-    return {"code": "WarpX", "machine": MACHINE, "platform": "cpu", "cores": threads, "devices": 1, "s_per_step": float(seconds) / int(calls)}
+    return {"code": "WarpX", "machine": MACHINE, "particles": 2 * N_PARTICLES, "platform": "cpu", "cores": threads, "devices": 1, "s_per_step": float(seconds) / int(calls)}
 
 
 # ----------------------------- run the benchmarks -----------------------------
@@ -151,7 +154,7 @@ if "--plot" not in sys.argv:
         print(f"WarpX    {threads} OpenMP thread(s) ...", flush=True)
         results.append(run_warpx(threads))
     results = [r for r in results if r]
-    with open(os.path.join(OUTPUT_DIR, f"scaling_{MACHINE}.json"), "w") as handle:
+    with open(os.path.join(OUTPUT_DIR, f"scaling_{MACHINE.replace(' ', '_')}.json"), "w") as handle:
         json.dump(results, handle, indent=1)
 
 # ----------------------------- plot, save, and print -----------------------------
@@ -160,7 +163,7 @@ results = [r for f in sorted(os.listdir(OUTPUT_DIR)) if f.startswith("scaling_")
 for r in results:
     r.setdefault("machine", "laptop")
     print(f"  {r['machine']:10s} {r['code']:8s} {r['platform']:5s} cores={r['cores'] or 'all':>3} devices={r['devices']}  "
-          f"{r['s_per_step'] * 1e3:9.2f} ms/step  {r['s_per_step'] * 1e9 / (2 * N_PARTICLES):8.1f} ns/particle/step")
+          f"{r['s_per_step'] * 1e3:9.2f} ms/step  {r['s_per_step'] * 1e9 / r.get('particles', 2 * N_PARTICLES):8.1f} ns/particle/step")
 
 
 def series(code, machine, kind):
@@ -182,6 +185,8 @@ for name, codes in figures:
     line = 0
     for code in codes:
         for machine in machines:
+            one_core = [r["s_per_step"] for r in results if r["code"] == code and r["machine"] == machine
+                        and r["platform"] == "cpu" and r["cores"] == 1 and r["devices"] == 1]
             for kind, (marker, ls, label) in styles.items():
                 n, t = series(code, machine, kind)
                 if not len(n):
@@ -189,9 +194,13 @@ for name, codes in figures:
                 color, line = f"C{line}", line + 1
                 tag = f"{code} {label}" + (f" [{machine}]" if len(machines) > 1 else "")
                 ax[0].loglog(n, t * 1e3, marker=marker, ls=ls, lw=2, ms=8, color=color, label=tag)
-                ax[1].plot(n, t[0] / t, marker=marker, ls=ls, lw=2, ms=8, color=color, label=tag)
+                ax[1].plot(n, (one_core[0] if one_core else t[0]) / t, marker=marker, ls=ls, lw=2, ms=8, color=color,
+                           label=tag + ("" if one_core else " (vs. 1 GPU)"))
     ax[0].set(xlabel="CPU cores / devices / GPUs", ylabel="wall time per step [ms]", title="Wall time per step")
-    ax[1].set(xlabel="CPU cores / devices / GPUs", ylabel="speed-up vs. 1 core / device / GPU", title="Strong scaling")
+    ax[1].set(xlabel="CPU cores / devices / GPUs", ylabel="speed-up vs. 1 CPU core", title="Strong scaling")
+    ax[1].set_yscale("log")
+    ax[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
+    ax[1].yaxis.set_minor_formatter(plt.NullFormatter())
     for a in ax:
         a.set_xscale("log", base=2)
         a.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
