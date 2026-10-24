@@ -285,7 +285,7 @@ for code, (t, field, _) in results["two_stream"].items():
         t_fit = t[window] * omega_b
         ax[0, 0].semilogy(t_fit, field[window][0] / field.max() * np.exp(t_fit - t_fit[0]), "k--", lw=1.5,
                           label=r"theory $e^{2\gamma t}$, $\gamma=\omega_b/2$")
-ax[0, 0].set(xlabel=r"$\omega_b t$", ylabel="E-field energy / max", title="(a) Two-stream instability", ylim=(1e-6, 2))
+ax[0, 0].set(xlabel=r"$\omega_b t$", ylabel="E-field energy / max", title="Two-stream instability", ylim=(1e-6, 2))
 
 amplitude = lg["eps"] * ME * C**2 * k_l / E
 for code, (t, field, _) in results["langmuir"].items():
@@ -295,7 +295,7 @@ for code, (t, field, _) in results["langmuir"].items():
     ax[0, 1].plot(t * omega_l, field / theory.max(), label=code, **{**style[code], "markevery": 3})
 t = results["langmuir"]["PyPIC3D"][0]
 ax[0, 1].plot(t * omega_l, np.sin(omega_l * t) ** 2, "k--", lw=1.2, label=r"theory $\sin^2\omega_p t$")
-ax[0, 1].set(xlabel=r"$\omega_p t$", ylabel="E-field energy / theory max", title="(b) Langmuir oscillation (WarpX test)")
+ax[0, 1].set(xlabel=r"$\omega_p t$", ylabel="E-field energy / theory max", title="Langmuir oscillation")
 
 root = kinetic_root(ld["k_lambda_d"])
 for code, (t, field, _) in results["landau"].items():
@@ -310,7 +310,7 @@ for code, (t, field, _) in results["landau"].items():
 t_theory = np.linspace(0, ld["t_end"], 200)
 ax[1, 0].semilogy(t_theory, np.exp(2 * root.imag * t_theory), "k--", lw=1.5,
                   label=rf"theory $e^{{2\gamma t}}$, $\gamma={root.imag:.3f}\,\omega_p$")
-ax[1, 0].set(xlabel=r"$\omega_p t$", ylabel="E-field energy / max", title=rf"(c) Landau damping, $k\lambda_D = {ld['k_lambda_d']}$",
+ax[1, 0].set(xlabel=r"$\omega_p t$", ylabel="E-field energy / max", title=rf"Landau damping, $k\lambda_D = {ld['k_lambda_d']}$",
              ylim=(1e-4, 2))
 
 for (code, (t, _, total)), color in zip(results["energy"].items(), ("C0", "C2", "C1")):
@@ -320,7 +320,7 @@ for (code, (t, _, total)), color in zip(results["energy"].items(), ("C0", "C2", 
     ax[1, 1].plot(t * wpe, 100 * drift, color=color, lw=2 if "PyPIC3D" in code else 0, marker=None if "PyPIC3D" in code else "o",
                   ms=4, label=code)
 ax[1, 1].axhspan(-100 * en["tolerance"], 100 * en["tolerance"], color="0.85", label="WarpX test tolerance")
-ax[1, 1].set(xlabel=r"$\omega_{pe} t$", ylabel="total energy change [%]", title="(d) Energy conservation (WarpX test)")
+ax[1, 1].set(xlabel=r"$\omega_{pe} t$", ylabel="total energy change [%]", title="Energy conservation")
 for a in ax.flat:
     a.legend(fontsize=9)
     a.grid(alpha=0.3, which="both")
