@@ -3,8 +3,7 @@
   (b) WarpX Langmuir test                    Examples/Tests/langmuir/inputs_test_1d_langmuir_multi (run longer);
                                              analytic E = eps m c^2 k / e sin(kz) sin(omega_p t), WarpX tolerance 5%
   (c) Landau damping at k lambda_D = 0.5     exact kinetic rate gamma = -0.1534 omega_p
-  (d) WarpX energy-conservation test         Examples/Tests/energy_conserving_thermal_plasma (1D);
-                                             WarpX tolerance |dE / E| < 0.3%
+  (d) electromagnetic waves in a cold plasma   omega^2 = omega_p^2 + c^2 k^2 (seeded transverse velocity)
 Run on Linux/WSL with WarpX on PATH:  python benchmarks/warpx_collisionless.py   (--plot redraws from the saved .npz)"""
 import os
 import shutil
@@ -27,7 +26,7 @@ jax.config.update("jax_enable_x64", True)
 TWO_STREAM = dict(n_beam=1.0e15, v0=1.5e7, cells=64, ppc=200, t_end=25.0)       # t_end in 1 / omega_b
 LANGMUIR = dict(n0=2.0e24, eps=0.01, length=40e-6, cells=128, ppc=2, steps=400)  # WarpX test (80 steps there)
 LANDAU = dict(density=1.0e16, vth_over_c=0.05, k_lambda_d=0.5, cells=32, ppc=2000, amplitude=0.05, t_end=30.0)
-ENERGY = dict(n0=1.0e30, te_ev=100.0, cells=8, ppc=4, steps=500, tolerance=0.003)  # WarpX test values
+EM_WAVE = dict(density=1.0e16, ck_over_wp=[0.5, 1.0, 2.0, 3.0], u_over_c=1e-3, cells=64, ppc=50, t_end=40.0)
 OUTPUT_DIR = "outputs/warpx_collisionless"
 WARPX = shutil.which("warpx.1d")
 
@@ -98,9 +97,9 @@ particles.species_names = {" ".join(s[0] for s in species)}
 {name}.density = {density}
 {name}.momentum_distribution_type = maxwellian
 {name}.maxwellian_u_mean_distribution_type = parser
-{name}.ux_mean_function(x,y,z) = "0"
+{name}.ux_mean_function(x,y,z) = "{drift[0] if isinstance(drift, tuple) else 0}"
 {name}.uy_mean_function(x,y,z) = "0"
-{name}.uz_mean_function(x,y,z) = "{drift}"
+{name}.uz_mean_function(x,y,z) = "{drift[1] if isinstance(drift, tuple) else drift}"
 {name}.maxwellian_u_std_distribution_type = constant
 {name}.ux_std = {vth / C}
 {name}.uy_std = {vth / C}
@@ -112,15 +111,15 @@ particles.species_names = {" ".join(s[0] for s in species)}
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 results = {}
 rng = np.random.default_rng(0)
-ts, lg, ld, en = TWO_STREAM, LANGMUIR, LANDAU, ENERGY
+ts, lg, ld, em = TWO_STREAM, LANGMUIR, LANDAU, EM_WAVE
 omega_b = np.sqrt(ts["n_beam"] * E**2 / (EPS * ME))
 omega_l, k_l = np.sqrt(2 * lg["n0"] * E**2 / (EPS * ME)), 2 * np.pi / 20e-6
 omega_p = np.sqrt(ld["density"] * E**2 / (EPS * ME))
-wpe = E * np.sqrt(en["n0"] / (ME * EPS))
+wp_em = np.sqrt(em["density"] * E**2 / (EPS * ME))
 if "--plot" in sys.argv:
     saved = np.load(os.path.join(OUTPUT_DIR, "warpx_collisionless.npz"))
     for key in saved.files:
-        case, code = key.split("_", 1) if not key.startswith("two_stream") else ("two_stream", key[11:])
+        case, code = ("two_stream", key[11:]) if key.startswith("two_stream") else key.split("_", 1)
         results.setdefault(case, {})[code] = tuple(saved[key].T)
 else:
 
@@ -222,53 +221,31 @@ else:
             ("ions", E, MP, ld["ppc"], ld["density"], 0.0, 0.0)],
             f"warpx.const_dt = {dt}\nalgo.current_deposition = direct\nalgo.particle_shape = 1\nions.do_not_push = 1"))}
 
-    en = ENERGY
-    wpe = E * np.sqrt(en["n0"] / (ME * EPS))
-    length, n = 10 * C / wpe, en["cells"] * en["ppc"]
-    print(f"[4/4] WarpX energy-conservation test, {en['steps']} steps", flush=True)
-    x = (np.arange(n) + 0.5) * length / n - length / 2
-    thermal = lambda m: np.sqrt(en["te_ev"] * E / m)
-    energy_case = lambda solver: run_pypic3d(f"energy_{solver}", {
-        "simulation_parameters": {"solver": solver, "Nt": en["steps"], "dt": 0.2 / wpe, "Nx": en["cells"], "x_wind": length,
-                                  "shape_factor": 2, "current_calculation": "esirkepov", "filter_j": "none"},
-        "plotting": {"plotting_interval": 10},
-        "particle1": {"name": "electrons", "N_particles": n, "charge": -E, "mass": ME, "vth": thermal(ME), "number_density": en["n0"],
-                      "initial_x": x},
-        "particle2": {"name": "protons", "N_particles": n, "charge": E, "mass": MP, "vth": thermal(MP), "number_density": en["n0"],
-                      "initial_x": x}})
-    warpx_energy = f"""max_step = {en['steps']}
-    amr.n_cell = {en['cells']}
-    amr.max_level = 0
-    geometry.dims = 1
-    warpx.do_electrostatic = labframe
-    algo.field_gathering = energy-conserving
-    algo.particle_shape = 2
-    warpx.use_filter = 0
-    my_constants.n0 = {en['n0']}
-    my_constants.T = {en['te_ev']}
-    my_constants.wpe = q_e*sqrt(n0/(m_e*epsilon0))
-    my_constants.de0 = clight/wpe
-    warpx.const_dt = 0.2/wpe
-    geometry.prob_lo = 0.0
-    geometry.prob_hi = 10.*de0
-    boundary.field_lo = periodic
-    boundary.field_hi = periodic
-    boundary.particle_lo = periodic
-    boundary.particle_hi = periodic
-    particles.species_names = electrons protons
-    """ + "".join(f"""{name}.species_type = {kind}
-    {name}.injection_style = "NUniformPerCell"
-    {name}.num_particles_per_cell_each_dim = {en['ppc']}
-    {name}.profile = constant
-    {name}.density = n0
-    {name}.momentum_distribution_type = gaussian
-    {name}.ux_th = sqrt(T*q_e/{mass})/clight
-    {name}.uy_th = sqrt(T*q_e/{mass})/clight
-    {name}.uz_th = sqrt(T*q_e/{mass})/clight
-    """ for name, kind, mass in (("electrons", "electron", "m_e"), ("protons", "proton", "m_p")))
-    results["energy"] = {"PyPIC3D (electrostatic)": energy_case("electrostatic"),
-                         "PyPIC3D (electromagnetic)": energy_case("electrodynamic_yee"),
-                         "WarpX (electrostatic)": run_warpx("energy", warpx_energy, interval=10)}
+    print(f"[4/4] Electromagnetic waves in a cold plasma (omega_p = {wp_em:.3e} 1/s)", flush=True)
+    for ck in em["ck_over_wp"]:
+        k = ck * wp_em / C
+        length = 2 * np.pi / k
+        dt = 0.99 * length / em["cells"] / C
+        n, u, vth = em["cells"] * em["ppc"], em["u_over_c"] * C, 1e-4 * C
+        x = rng.uniform(-length / 2, length / 2, n)
+        case = f"em{ck:g}"
+        results[case] = {
+            "PyPIC3D": run_pypic3d(case, {
+                "simulation_parameters": {"solver": "electrodynamic_yee", "t_wind": em["t_end"] / wp_em, "Nx": em["cells"],
+                                          "x_wind": length, "cfl": 0.99, "shape_factor": 1, "current_calculation": "j_from_rhov",
+                                          "filter_j": "none"},
+                "plotting": {"plotting_interval": 2},
+                "particle1": {"name": "electrons", "N_particles": n, "charge": -E, "mass": ME, "vth": vth,
+                              "number_density": em["density"], "initial_x": x,
+                              "initial_vy": vth * rng.standard_normal(n) + u * np.sin(k * x)},
+                "particle2": {"name": "ions", "N_particles": n, "charge": E, "mass": MP, "vth": 0.0,
+                              "number_density": em["density"], "update_x": False, "update_y": False, "update_z": False}}),
+            # transverse seed: PyPIC3D v_y (1D along x) corresponds to WarpX u_x (1D along z)
+            "WarpX": run_warpx(case, warpx_deck(length, em["cells"], int(em["t_end"] / wp_em / dt), [
+                ("electrons", -E, ME, em["ppc"], em["density"], vth, (f"{u / C}*sin({k}*z)", "0")),
+                ("ions", E, MP, em["ppc"], em["density"], 0.0, 0.0)],
+                f"warpx.const_dt = {dt}\nalgo.current_deposition = direct\nalgo.particle_shape = 1\nions.do_not_push = 1"),
+                interval=2)}
 
 # ----------------------------- plot, save, and print -----------------------------
 fig, ax = plt.subplots(2, 2, figsize=(12, 9.5))
@@ -313,14 +290,20 @@ ax[1, 0].semilogy(t_theory, np.exp(2 * root.imag * t_theory), "k--", lw=1.5,
 ax[1, 0].set(xlabel=r"$\omega_p t$", ylabel="E-field energy / max", title=rf"Landau damping, $k\lambda_D = {ld['k_lambda_d']}$",
              ylim=(1e-4, 2))
 
-for (code, (t, _, total)), color in zip(results["energy"].items(), ("C0", "C2", "C1")):
-    drift = (total - total[0]) / total[0]
-    summary.append(f"(d) energy      {code:26s} max |dE / E| = {100 * np.max(np.abs(drift)):.3f}% "
-                   f"({'pass' if np.max(np.abs(drift)) < en['tolerance'] else 'FAIL'} at WarpX's 0.3%)")
-    ax[1, 1].plot(t * wpe, 100 * drift, color=color, lw=2 if "PyPIC3D" in code else 0, marker=None if "PyPIC3D" in code else "o",
-                  ms=4, label=code)
-ax[1, 1].axhspan(-100 * en["tolerance"], 100 * en["tolerance"], color="0.85", label="WarpX test tolerance")
-ax[1, 1].set(xlabel=r"$\omega_{pe} t$", ylabel="total energy change [%]", title="Energy conservation")
+ck = np.linspace(0, 3.3, 100)
+ax[1, 1].plot(ck, np.sqrt(1 + ck**2), "k--", lw=1.5, label=r"theory $\omega^2=\omega_p^2+c^2k^2$")
+ax[1, 1].plot(ck, ck, "k:", lw=1, label="light line")
+for code in ("PyPIC3D", "WarpX"):
+    measured = []
+    for c in em["ck_over_wp"]:
+        t, field, _ = results[f"em{c:g}"][code]
+        peaks, _ = find_peaks(field, distance=max(int(0.6 * np.pi / (wp_em * np.sqrt(1 + c**2)) / (t[1] - t[0])), 1))
+        measured.append(np.pi / np.mean(np.diff(t[peaks])) / wp_em)
+        summary.append(f"(d) EM wave     {code:26s} ck/wp = {c:g}: omega = {measured[-1]:.4f} omega_p "
+                       f"(theory {np.sqrt(1 + c**2):.4f}), error {100 * abs(measured[-1] / np.sqrt(1 + c**2) - 1):.2f}%")
+    ax[1, 1].plot(em["ck_over_wp"], measured, lw=0, label=code,
+                  **(dict(color="C0", marker="o", ms=10, mfc="none", mew=2) if code == "PyPIC3D" else dict(color="C1", marker="o", ms=4)))
+ax[1, 1].set(xlabel=r"$ck/\omega_p$", ylabel=r"$\omega/\omega_p$", title="Electromagnetic waves in a plasma")
 for a in ax.flat:
     a.legend(fontsize=9)
     a.grid(alpha=0.3, which="both")
