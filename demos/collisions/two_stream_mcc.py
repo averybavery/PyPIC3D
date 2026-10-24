@@ -2,6 +2,7 @@
 electron-neutral Monte Carlo collisions (elastic + excitation) in a cold argon gas."""
 import os
 import shutil
+import sys
 
 import jax
 import matplotlib.pyplot as plt
@@ -98,26 +99,32 @@ vth = 3.5e4
 # ----------------------------- run the simulations -----------------------------
 runs = {}
 for name, collisions in (("collisionless", False), ("mcc", True)):
-    print(f"\n=== Two-stream run: {name} ===", flush=True)
-    path, out = write_config(name, collisions)
-    run_PyPIC3D(toml.load(path))
+    path, out = os.path.join(OUTPUT_DIR, name, f"{name}.toml"), os.path.join(OUTPUT_DIR, name)
+    if "--plot" not in sys.argv:
+        print(f"\n=== Two-stream run: {name} ===", flush=True)
+        path, out = write_config(name, collisions)
+        run_PyPIC3D(toml.load(path))
     load = lambda f: np.loadtxt(os.path.join(out, "data", f), delimiter=",", ndmin=2)
-    runs[name] = load("electric_field_energy.txt"), load("kinetic_energy.txt")
+    runs[name] = load("electric_field_energy.txt"), load("kinetic_energy.txt"), load("total_momentum.txt")
 
 # ----------------------------- plot, save, and print -----------------------------
-fig, ax = plt.subplots(1, 2, figsize=(12, 4.5))
-for name, (field, kinetic) in runs.items():
-    ax[0].semilogy(field[:, 0] * 1e9, field[:, 1], lw=2, label=name)
-    ax[1].plot(kinetic[:, 0] * 1e9, kinetic[:, 1] / kinetic[0, 1], lw=2, label=name)
+fig, ax = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+colors = {"collisionless": ("tab:red", "tab:blue", "tab:green"), "mcc": ("tab:orange", "tab:cyan", "tab:olive")}
+labels = {"collisionless": "collisionless", "mcc": "with electron-neutral MCC"}
+for name, (field, kinetic, momentum) in runs.items():
+    c = colors[name]
+    ax[0].plot(field[:, 0], field[:, 1], color=c[0], lw=2, label=labels[name])
+    ax[1].plot(kinetic[:, 0], kinetic[:, 1] / kinetic[0, 1], color=c[1], lw=2, label=labels[name])
+    ax[2].plot(momentum[:, 0], momentum[:, 1] / momentum[0, 1], color=c[2], lw=2, label=labels[name])
     peak = np.argmax(field[:, 1])
-    growth = np.polyfit(field[peak // 4: peak, 0], np.log(field[peak // 4: peak, 1]), 1)[0] / 2
-    print(f"{name:14s} field-energy growth rate = {growth:.3e} 1/s, peak E-field energy = {field[peak, 1]:.3e} J, "
+    print(f"{name:14s} peak E-field energy = {field[peak, 1]:.3e} J at t = {field[peak, 0]:.2e} s, "
           f"final kinetic / initial = {kinetic[-1, 1] / kinetic[0, 1]:.4f}")
-ax[0].set(xlabel="time [ns]", ylabel="electric field energy [J]", title="Two-stream growth")
-ax[1].set(xlabel="time [ns]", ylabel="kinetic energy / initial", title="Electron energy loss to argon")
+ax[0].set(ylabel="Electric field energy [J]", title="Weakly ionized two-stream comparison")
+ax[1].set(ylabel="Kinetic energy / initial")
+ax[2].set(ylabel=r"$\sum m|\mathbf{v}|$ / initial", xlabel="Time [s]")
 for a in ax:
     a.legend()
     a.grid(alpha=0.3)
 fig.tight_layout()
-fig.savefig(os.path.join(OUTPUT_DIR, "two_stream_mcc.png"), dpi=200)
+fig.savefig(os.path.join(OUTPUT_DIR, "two_stream_mcc.png"), dpi=300)
 print(f"Saved {OUTPUT_DIR}/two_stream_mcc.png")
