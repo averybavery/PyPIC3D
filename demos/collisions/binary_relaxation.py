@@ -25,7 +25,7 @@ COULOMB_LOG = 10.0
 EQUIL = dict(t_a=12_000.0, t_b=1_000.0, density=1.0e20, steps=100, relax_steps=25.0)  # [K], [m^-3]; ~e-fold in relax_steps
 THERM = dict(t_e=2_800.0, t_p=30.0, rate=0.008, dt=0.1, t_end=20.0)  # [K]; target nu / omega_pe; dt, t_end in 1 / omega_pe
 OUTPUT_DIR = "outputs/binary_relaxation"
-SEED = 0
+SEEDS = range(5)                    # independent random seeds; figures show mean +/- 1 std
 
 E, ME, KB, EPS = 1.602176634e-19, 9.1093837e-31, 1.380649e-23, 8.8541878128e-12
 
@@ -35,9 +35,16 @@ def spitzer(ta, tb, n):
     return 2 * E**4 * n * COULOMB_LOG / (3 * (2 * np.pi) ** 1.5 * EPS**2 * ME**2 * (KB * (ta + tb) / ME) ** 1.5)
 
 
-def run(temps, density, dt, steps, label):
+def band(ax, x, runs, color, label, **kw):
+    """Mean line with a shaded +/- 1 standard deviation band over seeds (runs has seeds on axis 0)."""
+    mean, std = runs.mean(0), runs.std(0)
+    ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.25, lw=0)
+    ax.plot(x, mean, color=color, label=label, **kw)
+
+
+def run(temps, density, dt, steps, label, seed):
     """Collide an electron and a positron population in one cell; return T_a(t), T_b(t) [K]."""
-    keys = jax.random.split(jax.random.PRNGKey(SEED), 4)
+    keys = jax.random.split(jax.random.PRNGKey(seed), 4)
     u = jnp.stack([jnp.sqrt(KB * t / ME) * jax.random.normal(k, (N, 3)) for k, t in zip(keys, temps)])
     particles = TiledParticles(x=jax.random.uniform(keys[2], (1, 1, 1, 2, N, 3), maxval=CELLS), u=u[None, None, None],
                                active=jnp.ones((1, 1, 1, 2, N), bool), key=keys[3])
@@ -51,13 +58,13 @@ def run(temps, density, dt, steps, label):
         v = np.asarray(particles.u[0, 0, 0])
         history.append(ME * np.mean(np.sum((v - v.mean(1, keepdims=True)) ** 2, -1), -1) / (3 * KB))
         if i % max(steps // 5, 1) == 0:
-            print(f"  {label}: step {i:4d}/{steps}  T = {history[-1][0]:8.1f} K, {history[-1][1]:8.1f} K", flush=True)
+            print(f"  {label} seed {seed}: step {i:4d}/{steps}  T = {history[-1][0]:8.1f} K, {history[-1][1]:8.1f} K", flush=True)
         if i < steps:
             particles = step(particles)
     return np.array(history)
 
 
-def run_warpx(temps, density, dt, steps):
+def run_warpx(temps, density, dt, steps, seed):
     """Same electron-positron box in WarpX (Perez binary collisions); return T_a(t), T_b(t) [K]."""
     out = os.path.abspath(os.path.join(OUTPUT_DIR, "warpx_equilibration"))
     shutil.rmtree(out, ignore_errors=True)
@@ -89,6 +96,7 @@ boundary.field_hi = periodic periodic periodic
 boundary.particle_lo = periodic periodic periodic
 boundary.particle_hi = periodic periodic periodic
 warpx.const_dt = {dt}
+warpx.random_seed = {seed + 1}
 algo.maxwell_solver = none
 algo.particle_shape = 1
 particles.species_names = a b
@@ -124,9 +132,9 @@ print("[1/2] Temperature equilibration")
 eq = EQUIL
 nu_eq = 2 * spitzer(eq["t_a"], eq["t_b"], eq["density"])
 dt_eq = 1 / (nu_eq * eq["relax_steps"])
-eq_history = run((eq["t_a"], eq["t_b"]), eq["density"], dt_eq, eq["steps"], "equilibration")
+eq_runs = np.array([run((eq["t_a"], eq["t_b"]), eq["density"], dt_eq, eq["steps"], "equilibration", s) for s in SEEDS])
 eq_spitzer = spitzer_curve((eq["t_a"], eq["t_b"]), eq["density"], dt_eq, eq["steps"])
-eq_warpx = run_warpx((eq["t_a"], eq["t_b"]), eq["density"], dt_eq, eq["steps"]) if WARPX else None
+eq_warpx = np.array([run_warpx((eq["t_a"], eq["t_b"]), eq["density"], dt_eq, eq["steps"], s) for s in SEEDS]) if WARPX else None
 
 print("[2/2] Electron-positron thermalization")
 th = THERM
@@ -136,50 +144,56 @@ omega_pe = omega_1 * np.sqrt(density)
 nu = 2 * spitzer(th["t_e"], th["t_p"], density)                      # rate of d|T_e - T_p| / dt at t = 0
 steps = int(round(th["t_end"] / th["dt"]))
 print(f"  n = {density:.3e} m^-3, omega_pe = {omega_pe:.3e} 1/s, Spitzer nu = {nu / omega_pe:.4f} omega_pe")
-th_history = run((th["t_e"], th["t_p"]), density, th["dt"] / omega_pe, steps, "thermalization")
+th_runs = np.array([run((th["t_e"], th["t_p"]), density, th["dt"] / omega_pe, steps, "thermalization", s) for s in SEEDS])
 
 # ----------------------------- plot, save, and print -----------------------------
 fig, ax = plt.subplots(figsize=(10, 5))
 steps_axis = np.arange(eq["steps"] + 1)
-ax.plot(steps_axis, eq_history[:, 0], color="tab:blue", lw=2, label="species A (PyPIC3D)")
-ax.plot(steps_axis, eq_history[:, 1], color="tab:orange", lw=2, label="species B (PyPIC3D)")
+band(ax, steps_axis, eq_runs[..., 0], "tab:blue", "species A (PyPIC3D)", lw=2)
+band(ax, steps_axis, eq_runs[..., 1], "tab:orange", "species B (PyPIC3D)", lw=2)
 if eq_warpx is not None:
-    ax.plot(steps_axis[::3], eq_warpx[::3, 0], "o", color="tab:blue", ms=4, mfc="none", label="species A (WarpX)")
-    ax.plot(steps_axis[::3], eq_warpx[::3, 1], "o", color="tab:orange", ms=4, mfc="none", label="species B (WarpX)")
+    for k, color, name in ((0, "tab:blue", "A"), (1, "tab:orange", "B")):
+        ax.errorbar(steps_axis[::4], eq_warpx[:, ::4, k].mean(0), eq_warpx[:, ::4, k].std(0), fmt="o", color=color, ms=4,
+                    mfc="none", capsize=2, label=f"species {name} (WarpX)")
 ax.plot(steps_axis, eq_spitzer[:, 0], color="0.4", ls="-.", lw=1.3, label="Spitzer (Maxwellian) theory")
 ax.plot(steps_axis, eq_spitzer[:, 1], color="0.4", ls="-.", lw=1.3)
-ax.axhline(eq_history[0].mean(), color="k", ls="--", lw=1.5, label="isolated-system equilibrium")
-ax.set(xlabel="Collision step", ylabel="Temperature [K]", title="Binary-collision temperature equilibration")
+ax.axhline(eq_runs[:, 0].mean(), color="k", ls="--", lw=1.5, label="isolated-system equilibrium")
+ax.set(xlabel="Collision step", ylabel="Temperature [K]",
+       title=rf"Binary-collision temperature equilibration (mean $\pm 1\sigma$, {len(SEEDS)} seeds)")
 ax.legend()
 ax.grid(alpha=0.3)
 fig.tight_layout()
 fig.savefig(os.path.join(OUTPUT_DIR, "binary_equilibration.png"), dpi=300)
 
 t = np.arange(steps + 1) * th["dt"]                                  # time in 1 / omega_pe
-dT = np.abs(th_history[:, 0] - th_history[:, 1])
-slope, intercept = np.polyfit(t, np.log(dT), 1)
-nu_fit = -slope
-equilibrium = th_history[0].mean()
-analytic = 0.5 * dT[0] * np.exp(-nu / omega_pe * t)
+dT = np.abs(th_runs[..., 0] - th_runs[..., 1])
+fits = np.array([np.polyfit(t, np.log(d), 1) for d in dT])          # per-seed exponential fits
+nu_fits = -fits[:, 0]
+equilibrium = th_runs[:, 0].mean()
+analytic = 0.5 * dT[:, 0].mean() * np.exp(-nu / omega_pe * t)
 fig, ax = plt.subplots(1, 2, figsize=(14, 5.5))
-ax[0].plot(t, th_history[:, 0], color="#9bbcff", lw=2, label="Electrons (data)")
-ax[0].plot(t, th_history[:, 1], color="#ff9aaa", lw=2, label="Positrons (data)")
+band(ax[0], t, th_runs[..., 0], "#6f9cff", "Electrons (data)", lw=2)
+band(ax[0], t, th_runs[..., 1], "#ff7088", "Positrons (data)", lw=2)
 ax[0].plot(t, equilibrium + analytic, "k--", lw=1.8, label=f"Analytic Spitzer rate (nu={nu / omega_pe:.4f})")
 ax[0].plot(t, equilibrium - analytic, "k--", lw=1.8)
 ax[0].axhline(equilibrium, color="0.55", ls=":", label="Theoretical equilibrium")
 ax[0].set(title="Coupled Temperature Relaxation", xlabel=r"Time ($\omega_{pe}^{-1}$)", ylabel="Temperature (K)")
-ax[1].semilogy(t, dT, color="#c45bd5", lw=2, label=r"$|T_e - T_p|$ data")
-ax[1].semilogy(t, np.exp(intercept - nu_fit * t), "k--", lw=1.8, label=f"Exponential fit (nu={nu_fit:.4f})")
-ax[1].set(title="Relaxation Rate Verification", xlabel=r"Time ($\omega_{pe}^{-1}$)", ylabel=r"$|\Delta T|$ (log scale)")
+band(ax[1], t, dT, "#c45bd5", r"$|T_e - T_p|$ data", lw=2)
+ax[1].plot(t, np.exp(fits[:, 1].mean() - nu_fits.mean() * t), "k--", lw=1.8,
+           label=rf"Exponential fit (nu={nu_fits.mean():.4f} $\pm$ {nu_fits.std():.4f})")
+ax[1].plot(t, dT[:, 0].mean() * np.exp(-nu / omega_pe * t), color="0.45", ls="-.", lw=1.5,
+           label=f"Spitzer rate (nu={nu / omega_pe:.4f})")
+ax[1].set(title="Relaxation Rate Verification", xlabel=r"Time ($\omega_{pe}^{-1}$)", ylabel=r"$|\Delta T|$ (log scale)", yscale="log")
 for a in ax:
     a.grid(True, linestyle=":", alpha=0.55)
     a.legend(fontsize=9)
 fig.tight_layout()
 fig.savefig(os.path.join(OUTPUT_DIR, "binary_thermalization.png"), dpi=300)
 
-print(f"Equilibration: equilibrium {eq_history[0].mean():.0f} K; final dT: PyPIC3D {eq_history[-1, 0] - eq_history[-1, 1]:.0f} K, "
-      + (f"WarpX {eq_warpx[-1, 0] - eq_warpx[-1, 1]:.0f} K, " if eq_warpx is not None else "")
-      + f"Spitzer {eq_spitzer[-1, 0] - eq_spitzer[-1, 1]:.0f} K (initial {eq['t_a'] - eq['t_b']:.0f} K)")
-print(f"Thermalization: Spitzer nu = {nu / omega_pe:.5f} omega_pe, fitted nu = {nu_fit:.5f} omega_pe, "
-      f"ratio {nu_fit * omega_pe / nu:.3f}")
+gap = lambda r: r[:, -1, 0] - r[:, -1, 1]
+print(f"Equilibration (final dT, initial {eq['t_a'] - eq['t_b']:.0f} K): PyPIC3D {gap(eq_runs).mean():.0f} +/- {gap(eq_runs).std():.0f} K, "
+      + (f"WarpX {gap(eq_warpx).mean():.0f} +/- {gap(eq_warpx).std():.0f} K, " if eq_warpx is not None else "")
+      + f"Spitzer {eq_spitzer[-1, 0] - eq_spitzer[-1, 1]:.0f} K")
+print(f"Thermalization: Spitzer nu = {nu / omega_pe:.5f} omega_pe, fitted nu = {nu_fits.mean():.5f} +/- {nu_fits.std():.5f} omega_pe, "
+      f"ratio {nu_fits.mean() * omega_pe / nu:.3f} +/- {nu_fits.std() * omega_pe / nu:.3f}")
 print(f"Saved {OUTPUT_DIR}/binary_equilibration.png and binary_thermalization.png")
