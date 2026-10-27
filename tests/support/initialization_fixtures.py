@@ -12,7 +12,6 @@ from PyPIC3D.relativity.field_state import physical_fields
 import jax
 import jax.numpy as jnp
 from PyPIC3D.initialization import (
-    _available_cpu_threads,
     _encode_field_bc,
     _encode_particle_bc,
     _resolve_particle_batch_size,

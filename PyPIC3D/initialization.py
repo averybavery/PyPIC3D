@@ -213,91 +213,25 @@ def _validate_static_metric_conducting_widths(static_parameters, grid_shape):
             )
 
 
-_CPU_PARTICLES_PER_LOGICAL_THREAD = 128
-_ACCELERATOR_PARTICLE_BATCH_TARGET = 1024
-
-
-def _available_cpu_threads():
-    """Return the logical CPU allocation visible to this process."""
-
-    try:
-        cpu_threads = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        cpu_threads = os.cpu_count()
-    return max(1, int(cpu_threads or 1))
-
-
-def _local_mesh_device_count(field_mesh):
-    """Count mesh devices owned by this JAX process."""
-
-    process_index = int(jax.process_index())
-    local_devices = sum(
-        int(device.process_index) == process_index
-        for device in field_mesh.devices.flat
-    )
-    return max(1, int(local_devices))
-
-
-def _resolve_particle_batch_size(
-    particles,
-    requested_batch_size,
-    field_mesh=None,
-    *,
-    platform=None,
-    available_cpu_threads=None,
-    local_device_count=None,
-):
-    """Resolve a static batch size from actual occupancy and backend parallelism.
+def _resolve_particle_batch_size(particles, requested_batch_size):
+    """Resolve a static particle batch size.
 
     ``requested_batch_size`` is None for automatic sizing, or a positive integer
-    already validated by ``build_static_parameters``.
+    already validated by ``build_static_parameters``. Automatic sizing pushes the
+    largest active tile in one batch: tiles run in parallel across devices, and
+    smaller batches serialize the push into a long ``lax.while_loop`` (about 10x
+    slower with multiple tiles, worse on GPUs).
     """
 
     tile_capacity = int(particles.active.shape[-2]) * int(particles.active.shape[-1])
     if tile_capacity == 0:
         return 1, "empty particle storage"
-
     if requested_batch_size is not None:
         resolved = min(int(requested_batch_size), tile_capacity)
         return resolved, f"explicit request {int(requested_batch_size)}, tile capacity {tile_capacity}"
-
-    active = jnp.asarray(jax.device_get(particles.active), dtype=bool)
-    active_per_tile = jnp.count_nonzero(active, axis=(-2, -1))
+    active_per_tile = jnp.count_nonzero(jnp.asarray(jax.device_get(particles.active), dtype=bool), axis=(-2, -1))
     max_active_per_tile = int(jnp.max(active_per_tile)) if active_per_tile.size else 0
-    tile_count = int(active_per_tile.size)
-
-    if tile_count <= 1:
-        resolved = max(1, min(max_active_per_tile, tile_capacity))
-        return resolved, f"one tile, {max_active_per_tile} active particles"
-
-    if platform is None:
-        if field_mesh is None:
-            raise ValueError("field_mesh is required to resolve an automatic multi-tile particle batch size.")
-        platform = str(field_mesh.devices.flat[0].platform)
-
-    if platform == "cpu":
-        if available_cpu_threads is None:
-            available_cpu_threads = _available_cpu_threads()
-        if local_device_count is None:
-            if field_mesh is None:
-                raise ValueError("field_mesh is required to determine the local CPU device count.")
-            local_device_count = _local_mesh_device_count(field_mesh)
-        available_cpu_threads = max(1, int(available_cpu_threads))
-        local_device_count = max(1, int(local_device_count))
-        threads_per_device = max(1, available_cpu_threads // local_device_count)
-        compute_target = _CPU_PARTICLES_PER_LOGICAL_THREAD * threads_per_device
-        reason = (
-            f"cpu, {available_cpu_threads} logical threads / {local_device_count} local devices, "
-            f"target {compute_target}, max active tile {max_active_per_tile}"
-        )
-    else:
-        compute_target = _ACCELERATOR_PARTICLE_BATCH_TARGET
-        reason = (
-            f"{platform}, target {compute_target}, max active tile {max_active_per_tile}"
-        )
-
-    resolved = max(1, min(max_active_per_tile, compute_target, tile_capacity))
-    return resolved, reason
+    return max(1, min(max_active_per_tile, tile_capacity)), f"whole tile, {max_active_per_tile} active particles"
 
 
 def _apply_pml_field_boundaries(static_config, pml_config):
@@ -630,11 +564,7 @@ def initialize_simulation(toml_file):
         static_parameters,
         dynamic_parameters,
     )
-    effective_batch_size, batch_size_reason = _resolve_particle_batch_size(
-        particles,
-        requested_particle_batch_size,
-        static_parameters.field_mesh,
-    )
+    effective_batch_size, batch_size_reason = _resolve_particle_batch_size(particles, requested_particle_batch_size)
     if requested_particle_batch_size is None:
         print(
             f"Using automatic particle_batch_size {effective_batch_size} "

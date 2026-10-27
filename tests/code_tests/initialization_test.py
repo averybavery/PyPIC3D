@@ -7,7 +7,6 @@ from tests.support.initialization_fixtures import (
     BC_PERIODIC,
     InitializationFunctionsFixtures,
     TiledParticles,
-    _available_cpu_threads,
     _encode_field_bc,
     _encode_particle_bc,
     _resolve_particle_batch_size,
@@ -106,48 +105,7 @@ class TestInitializationFunctions(InitializationFunctionsFixtures, unittest.Test
         batch_size, reason = _resolve_particle_batch_size(particles, None)
 
         self.assertEqual(batch_size, 8)
-        self.assertIn("one tile", reason)
-
-
-    def test_automatic_particle_batch_size_uses_cpu_threads_per_local_device(self):
-        active = np.zeros((2, 2, 1, 1, 1000), dtype=bool)
-        active[..., :900] = True
-        particles = self._particles_with_active(active)
-
-        wider, _ = _resolve_particle_batch_size(
-            particles,
-            None,
-            platform="cpu",
-            available_cpu_threads=16,
-            local_device_count=4,
-        )
-        narrower, _ = _resolve_particle_batch_size(
-            particles,
-            None,
-            platform="cpu",
-            available_cpu_threads=8,
-            local_device_count=4,
-        )
-
-        self.assertEqual(wider, 512)
-        self.assertEqual(narrower, 256)
-
-
-    def test_available_cpu_threads_falls_back_to_os_cpu_count(self):
-        with patch("PyPIC3D.initialization.os.sched_getaffinity", side_effect=OSError):
-            with patch("PyPIC3D.initialization.os.cpu_count", return_value=12):
-                self.assertEqual(_available_cpu_threads(), 12)
-
-
-    def test_automatic_particle_batch_size_uses_accelerator_fallback(self):
-        active = np.zeros((2, 1, 1, 1, 2048), dtype=bool)
-        active[..., :1500] = True
-        particles = self._particles_with_active(active)
-
-        batch_size, reason = _resolve_particle_batch_size(particles, None, platform="gpu")
-
-        self.assertEqual(batch_size, 1024)
-        self.assertIn("gpu", reason)
+        self.assertIn("whole tile", reason)
 
 
     def test_automatic_particle_batch_size_uses_largest_active_tile(self):
@@ -156,13 +114,7 @@ class TestInitializationFunctions(InitializationFunctionsFixtures, unittest.Test
         active[1, 0, 0, 0, :13] = True
         particles = self._particles_with_active(active)
 
-        batch_size, _ = _resolve_particle_batch_size(
-            particles,
-            None,
-            platform="cpu",
-            available_cpu_threads=64,
-            local_device_count=2,
-        )
+        batch_size, _ = _resolve_particle_batch_size(particles, None)
 
         self.assertEqual(batch_size, 13)
 
