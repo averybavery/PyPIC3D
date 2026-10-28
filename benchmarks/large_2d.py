@@ -1,5 +1,5 @@
-"""Large 2D strong-scaling run: 800 x 800 cells, 500M macro-particles (electrons + ions), on the CPU cores of one
-node and on 1, 2, 4 GPUs, sweeping the user-set particle_batch_size (no code changes). Run on a GPU node:
+"""Large 2D strong-scaling run: 800 x 800 cells, 500M macro-particles (electrons + ions), on 1, 2, 4 GPUs,
+sweeping the user-set particle_batch_size (no code changes). Run on a GPU node:
     python benchmarks/large_2d.py            (writes outputs/large_2d/large_2d_<machine>.json and the figure)
     python benchmarks/large_2d.py --plot     (redraws from the saved JSON)
 LARGE2D_NX / LARGE2D_PARTICLES shrink the problem for a quick test; with no GPU, CPU devices stand in for GPUs."""
@@ -80,7 +80,7 @@ if "--worker" in sys.argv:
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 path = os.path.join(OUTPUT_DIR, f"large_2d_{MACHINE}.json")
 if "--plot" not in sys.argv:
-    runs = [(ACCEL, n, b) for n in COUNTS for b in (BATCHES if n > 1 else [None])] + [("cpu", 1, None)]
+    runs = [(ACCEL, n, b) for n in COUNTS for b in (BATCHES if n > 1 else [None])]
     print(f"{MACHINE}: {NX} x {NX} cells, {PARTICLES:,} particles, {len(runs)} runs, GPUs {GPUS}")
     results = []
     for backend, devices, batch in runs:
@@ -95,35 +95,41 @@ if "--plot" not in sys.argv:
 
 # ----------------------------- plot, save, and print -----------------------------
 results = [r for r in json.load(open(path)) if "error" not in r]
-cpu = next((r for r in results if r["backend"] == "cpu" and r["devices"] == 1), None)
-accel = sorted({(r["backend"], r["devices"]) for r in results if r is not cpu})
-best = {k: min((r for r in results if (r["backend"], r["devices"]) == k and r is not cpu), key=lambda r: r["s_per_step"]) for k in accel}
-shades = dict(zip(accel, plt.cm.Blues(np.linspace(0.45, 0.95, len(accel)))))
+hardware = sorted({(r["backend"], r["devices"]) for r in results})
+runs = {k: [r for r in results if (r["backend"], r["devices"]) == k] for k in hardware}
+best = {k: min(rows, key=lambda r: r["s_per_step"]) for k, rows in runs.items()}
+default = {k: next((r for r in rows if r["batch"] is None), None) for k, rows in runs.items()}
+one = best.get(hardware[0]) if hardware and hardware[0][1] == 1 else None   # 1-device reference
+shades = dict(zip(hardware, plt.cm.Blues(np.linspace(0.45, 0.95, len(hardware)))))
 name = lambda b, d: f"{d} {'GPU' if b == 'cuda' else 'CPU device'}{'s' if d > 1 else ''}"
 fig, ax = plt.subplots(1, 2, figsize=(13, 5))
-for k in accel:
-    rows = sorted((r for r in results if (r["backend"], r["devices"]) == k and r["batch"] is not None), key=lambda r: r["batch_size"])
-    auto = [r for r in results if (r["backend"], r["devices"]) == k and r["batch"] is None]
+for k in hardware:
+    rows = sorted((r for r in runs[k] if r["batch"] is not None), key=lambda r: r["batch_size"])
     if rows:
         ax[0].plot([r["batch_size"] for r in rows], [r["s_per_step"] for r in rows], "o-", lw=2, color=shades[k], label=name(*k))
-    for r in auto:
-        ax[0].plot(r["batch_size"], r["s_per_step"], "s", ms=9, mfc="none", mew=2, color=shades[k],
+    if default[k]:
+        ax[0].plot(default[k]["batch_size"], default[k]["s_per_step"], "s", ms=9, mfc="none", mew=2, color=shades[k],
                    label=f"{name(*k)}, default batch size")
-if cpu:
-    ax[0].axhline(cpu["s_per_step"], color="0.4", ls="--", lw=1.5, label=f"CPU, {cpu['cores']} cores")
-    ax[1].bar([f"CPU\n{cpu['cores']} cores"] + [name(*k) for k in accel], [1] + [cpu["s_per_step"] / best[k]["s_per_step"] for k in accel],
-              color=["0.6"] + [shades[k] for k in accel])
-    for i, k in enumerate(accel, 1):
-        ax[1].text(i, cpu["s_per_step"] / best[k]["s_per_step"], f"{cpu['s_per_step'] / best[k]['s_per_step']:.0f}x", ha="center", va="bottom")
+if one:
+    x, width = np.arange(len(hardware)), 0.38
+    for shift, pick, label, style in ((-0.5, default, "default batch size", dict(hatch="//", fill=False)),
+                                      (0.5, best, "best batch size", {})):
+        values = [one["s_per_step"] / pick[k]["s_per_step"] if pick[k] else np.nan for k in hardware]
+        bars = ax[1].bar(x + shift * width, values, width, label=label, edgecolor=[shades[k] for k in hardware],
+                         color=[shades[k] for k in hardware], lw=1.5, **style)
+        ax[1].bar_label(bars, labels=[f"{v:.2g}x" if np.isfinite(v) else "" for v in values], fontsize=9, padding=2)
+    ax[1].plot(x, [d for _, d in hardware], "k:", lw=1, label="ideal")
+    ax[1].set_xticks(x, [name(*k) for k in hardware])
+    ax[1].legend(fontsize=9)
 ax[0].set(xscale="log", yscale="log", xlabel="particle_batch_size", ylabel="wall time per step [s]", title="Batch-size sweep")
-ax[1].set(yscale="log", ylabel="speed-up vs. CPU node (best batch size)", title="GPU speed-up")
+ax[1].set(yscale="log", ylabel="speed-up vs. 1 GPU", title="Multi-GPU speed-up")
 ax[0].legend(fontsize=9)
 for a in ax:
     a.grid(alpha=0.3, which="both")
 fig.suptitle(f"PyPIC3D 2D, {NX} x {NX} cells, {PARTICLES / 1e6:g}M particles")
 fig.tight_layout()
 fig.savefig(os.path.join(OUTPUT_DIR, f"large_2d_{MACHINE}.png"), dpi=300)
-for k in accel:
+for k in hardware:
     print(f"  {name(*k)}: best batch size {best[k]['batch_size']:,}, {best[k]['s_per_step']:.3f} s/step"
-          + (f", {cpu['s_per_step'] / best[k]['s_per_step']:.1f}x the CPU node" if cpu else ""))
+          + (f", {one['s_per_step'] / best[k]['s_per_step']:.2f}x 1 device" if one else ""))
 print(f"Saved {OUTPUT_DIR}/large_2d_{MACHINE}.png")

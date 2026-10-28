@@ -1,5 +1,5 @@
 #!/bin/bash
-# Large 2D run (benchmarks/large_2d.py): 800 x 800 cells, 500M particles, CPU cores vs 1, 2, 4 A100s (80 GB).
+# Large 2D run (benchmarks/large_2d.py): 800 x 800 cells, 500M particles, on 1, 2, 4 A100s (80 GB).
 # PyPIC3D itself is a clean clone of UWPlasma/PyPIC3D main, so no local code changes are timed.
 # Submit from the repository root:   sbatch -A <your_project>_g benchmarks/perlmutter_2d.sh
 # Interactive (inside salloc, from the repository root):   SLURM_SUBMIT_DIR=$PWD bash benchmarks/perlmutter_2d.sh
@@ -10,7 +10,7 @@
 #SBATCH -N 1
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
-#SBATCH -t 05:00:00
+#SBATCH -t 04:00:00
 #SBATCH -o pypic3d_large_2d_%j.log
 
 module load python
