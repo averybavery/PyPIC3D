@@ -24,10 +24,9 @@ def particle_batch_indices(active_indices, n_active, batch_index, batch_size):
 
     active_offsets = batch_index * batch_size + jnp.arange(batch_size)
     valid = active_offsets < n_active
-    safe_offsets = jnp.minimum(
-        active_offsets,
-        jnp.maximum(n_active - 1, 0),
-    )
+    safe_offsets = active_offsets % jnp.maximum(n_active, 1)
+    # padding entries cycle through the active particles: callers mask them out, and spreading them avoids
+    # every padded scatter hitting the same grid cells (serialized GPU atomics)
     particle_indices = active_indices[safe_offsets]
 
     return particle_indices, valid
