@@ -9,7 +9,7 @@
 #SBATCH -N 1
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
-#SBATCH -t 00:30:00
+#SBATCH -t 01:00:00
 #SBATCH -o pypic3d_profile_%j.log
 
 module load python
