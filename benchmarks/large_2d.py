@@ -35,7 +35,12 @@ def worker(backend, devices, batch):
                       CUDA_VISIBLE_DEVICES=",".join(map(str, range(devices))), XLA_PYTHON_CLIENT_MEM_FRACTION="0.95")
     import jax
     import PyPIC3D
+    import PyPIC3D.initialization
     from PyPIC3D.initialization import initialize_simulation
+
+    # skip the one-time initial histograms: they gather every particle onto GPU 0 (out of memory at 500M);
+    # the timed step is unchanged
+    PyPIC3D.initialization.particles_for_output = lambda *args, **kwargs: []
 
     species = lambda name, q, m: {"name": name, "N_particles": PARTICLES // 2, "charge": q, "mass": m,
                                   "vth": float(np.sqrt(TEMPERATURE_EV * E / m)), "number_density": DENSITY}
@@ -68,7 +73,7 @@ def measure(backend, devices, batch):
         return {"backend": backend, "devices": devices, "batch": batch, "error": f"over {TIMEOUT} s"}
     line = [l for l in out.stdout.splitlines() if l.startswith("RESULT ")]
     if not line:
-        return {"backend": backend, "devices": devices, "batch": batch, "error": out.stderr[-600:]}
+        return {"backend": backend, "devices": devices, "batch": batch, "error": out.stderr[-4000:]}
     return {"backend": backend, "devices": devices, "batch": batch, "particles": PARTICLES, "nx": NX, **json.loads(line[-1][7:])}
 
 
@@ -87,7 +92,7 @@ if "--plot" not in sys.argv:
         start = time.perf_counter()
         r = measure(backend, devices, batch)
         results.append(r)
-        print(f"  {backend} x{devices}  batch {batch or 'auto'}: " + (r["error"] if "error" in r else
+        print(f"  {backend} x{devices}  batch {batch or 'auto'}: " + (r["error"].strip().splitlines()[-1] if "error" in r else
               f"batch size {r['batch_size']:,}  {r['s_per_step']:.3f} s/step  (init {r['init_s']:.0f} s)  {r['pypic3d']}") +
               f"  [{time.perf_counter() - start:.0f} s]", flush=True)
         with open(path, "w") as handle:
