@@ -2,7 +2,8 @@
 sweeping the user-set particle_batch_size (no code changes). Run on a GPU node:
     python benchmarks/large_2d.py            (writes outputs/large_2d/large_2d_<machine>_<particles>M.json and the figure)
     python benchmarks/large_2d.py --plot     (redraws from every saved particle count)
-LARGE2D_PARTICLES sets the particle count (e.g. 100000000 for a problem that fits on one GPU); LARGE2D_NX and
+LARGE2D_PARTICLES sets the particle count (e.g. 100000000 for a problem that fits on one GPU), LARGE2D_GPUS the
+device counts (e.g. 1; results for other counts already saved are kept); LARGE2D_NX and
 LARGE2D_PARTICLES also shrink it for a quick test. With no GPU, CPU devices stand in for GPUs."""
 import json
 import os
@@ -21,7 +22,8 @@ PARTICLES = int(os.environ.get("LARGE2D_PARTICLES", 500_000_000))  # macro-parti
 STEPS, TIMEOUT = 3, 1800         # timed steps per run (after 2 warm-up steps); seconds before a run is abandoned
 BATCHES = [None, 2**20, 2**22, 2**24, 10**12]  # particle_batch_size: None = automatic default, 10**12 = whole tile
 GPUS = len(subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True).stdout.split("GPU ")) - 1 if shutil.which("nvidia-smi") else 0
-ACCEL, COUNTS = ("cuda", [n for n in (1, 2, 4) if n <= GPUS]) if GPUS else ("cpu", [1, 2])
+WANTED = [int(n) for n in os.environ.get("LARGE2D_GPUS", "1,2,4").split(",")]  # device counts to run (e.g. LARGE2D_GPUS=1)
+ACCEL, COUNTS = ("cuda", [n for n in WANTED if n <= GPUS]) if GPUS else ("cpu", [n for n in WANTED if n <= 2])
 DENSITY, TEMPERATURE_EV = 1.0e18, 10.0
 OUTPUT_DIR = "outputs/large_2d"
 MACHINE = os.environ.get("NERSC_HOST", platform.node())
@@ -86,9 +88,10 @@ if "--worker" in sys.argv:
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 path = os.path.join(OUTPUT_DIR, f"large_2d_{MACHINE}_{PARTICLES // 10**6}M.json")
 if "--plot" not in sys.argv:
-    runs = [(ACCEL, n, b) for n in COUNTS for b in (BATCHES if n > 1 else [None])]
+    runs = [(ACCEL, n, b) for n in COUNTS for b in BATCHES]
     print(f"{MACHINE}: {NX} x {NX} cells, {PARTICLES:,} particles, {len(runs)} runs, GPUs {GPUS}")
-    results = []
+    # keep earlier results for this particle count that this call does not rerun
+    results = [r for r in (json.load(open(path)) if os.path.exists(path) else []) if (r["backend"], r["devices"], r["batch"]) not in runs]
     for backend, devices, batch in runs:
         start = time.perf_counter()
         r = measure(backend, devices, batch)
